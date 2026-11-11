@@ -1,5 +1,11 @@
 # 相机工作台：逐帧诊断日志
 
+## 时间戳与界面的边界
+
+V4L2 返回的 `CapturedFrame::timestamp` 和 `sequence` 是采集帧的元数据，编码器使用采集时间戳作为 PTS。预览分支通过 `PreviewImage` 把画面、PTS、序号和时间戳标志一起交给 Qt；即使关闭日志，这些元数据仍然存在。V4L2 的 PTS 通常使用单调时钟，不能直接当作日期显示。
+
+`FrameLog` 只记录各环节的诊断时间点，不决定录像或推流的时间戳。`MainWindow` 不持有 `FrameLog`，只接收 `PreviewImage` 和数值形式的 `PipelineDiagnostics`。日志文字仍写入文件，界面不会解析日志文本来计算耗时。界面调用 `noteUiSubmitted()` 标记已提交画面，但它不代表屏幕硬件已经显示该帧。
+
 Qt 程序启动摄像头时默认开启诊断。每张帧只在内存中记时间点，采集线程每秒产生一条统计摘要；独立写入线程负责保存文件。故障帧另记一条带采集序号和时间戳的详情。普通运行不会逐帧写磁盘。
 
 日志默认放在 `$XDG_STATE_HOME/CameraWorkbench/logs/`；未设置 `XDG_STATE_HOME` 时放在 `$HOME/.local/state/CameraWorkbench/logs/`。每次启动使用 `camera_YYYYMMDD_HHMMSS.log` 文件名。Qt「设置 → 运行诊断」会显示实际路径；录像仍保存在用户选择的录像目录。

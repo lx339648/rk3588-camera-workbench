@@ -16,7 +16,6 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QProcess>
-#include <QRegularExpression>
 #include <QPushButton>
 #include <QPixmap>
 #include <QSlider>
@@ -762,22 +761,17 @@ void MainWindow::stopOwnedServer() {
 
 void MainWindow::updateCameraView() {
     std::string error;
-    std::string logSummary;
-    if (pipeline_.logEnabled() && pipeline_.takeLogSummary(logSummary)) {
-        const QString full = QString::fromStdString(logSummary);
-        auto average = [&full](const QString& stage) {
-            const QRegularExpression pattern(
-                QRegularExpression::escape(stage) +
-                QStringLiteral("\\[n=\\d+,avg=([0-9.]+)ms"));
-            const auto match = pattern.match(full);
-            return match.hasMatch() ? match.captured(1) : QStringLiteral("--");
+    PipelineDiagnostics diagnostic;
+    if (pipeline_.takeDiagnostics(diagnostic)) {
+        auto displayMs = [](double value) {
+            return value >= 0 ? QString::number(value, 'f', 2) : QStringLiteral("--");
         };
         diagnosticLabel_->setText(QString("诊断  转换 %1 ms · 编码 %2 ms · 推流 %3 ms · 采集→界面 %4 ms")
-            .arg(average("convert"))
-            .arg(average("encode"))
-            .arg(average("rtsp_write"))
-            .arg(average("capture_to_ui_submitted")));
-        diagnosticLabel_->setToolTip(full);
+            .arg(displayMs(diagnostic.convertMs))
+            .arg(displayMs(diagnostic.encodeMs))
+            .arg(displayMs(diagnostic.rtspWriteMs))
+            .arg(displayMs(diagnostic.captureToUiMs)));
+        diagnosticLabel_->setToolTip(QString::fromStdString(diagnostic.detail));
     }
     if (pipeline_.takeError(error)) {
         pageHint_->setText(QString::fromStdString(error));
@@ -825,13 +819,12 @@ void MainWindow::updateCameraView() {
         pipeline_.recording() ? "停止录制" : "等待关键帧，准备录制…");
 
     if (!powerOn_ || !previewOn_ || currentPage_ != 0) return;
-    QImage image;
-    FrameLog imageLog;
-    if (pipeline_.takeLatestImage(image, imageLog)) {
-        const QPixmap pixmap = QPixmap::fromImage(std::move(image));
+    PreviewImage frame;
+    if (pipeline_.takeLatestImage(frame)) {
+        const QPixmap pixmap = QPixmap::fromImage(std::move(frame.image));
         videoLabel_->setPixmap(pixmap.scaled(videoLabel_->size(),
             Qt::KeepAspectRatio, Qt::FastTransformation));
-        pipeline_.noteUiSubmitted(std::move(imageLog));
+        pipeline_.noteUiSubmitted();
         ++previewFramesInWindow_;
     }
     if (fpsClock_.isValid() && fpsClock_.elapsed() >= 1000) {
