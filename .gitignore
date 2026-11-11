@@ -1,0 +1,22 @@
+# CMake / Qt build output
+**/build/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/Makefile
+*.o
+*.a
+*.so
+*.so.*
+
+# Locally recorded or generated media and diagnostics
+*.h264
+*.mkv
+*.mp4
+*.log
+logs/
+
+# Editor and system files
+*.user
+.DS_Store
+Thumbs.db
