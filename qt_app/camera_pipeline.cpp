@@ -45,9 +45,10 @@ void CameraPipeline::start() {
         std::lock_guard<std::mutex> lock(mutex_);
         lastError_.clear();
         lastRecordError_.clear();
-        latestImage_ = QImage();
+        latestImage_ = {};
         latestLog_ = {};
-        lastLogSummary_.clear();
+        takenImageLog_ = {};
+        lastDiagnostics_ = {};
         logPath_ = logReady ? logWriter_.path() : std::string();
         if (requestedLog && !logReady) lastError_ = logError;
     }
@@ -74,8 +75,9 @@ void CameraPipeline::stop() {
     alive_ = false;
     finished_ = true;
     std::lock_guard<std::mutex> lock(mutex_);
-    latestImage_ = QImage();
+    latestImage_ = {};
     latestLog_ = {};
+    takenImageLog_ = {};
     pendingPreview_ = RawPreview{};
 }
 
@@ -83,8 +85,9 @@ void CameraPipeline::setPreviewEnabled(bool enabled) {
     preview_ = enabled;
     if (!enabled) {
         std::lock_guard<std::mutex> lock(mutex_);
-        latestImage_ = QImage();
+        latestImage_ = {};
         latestLog_ = {};
+        takenImageLog_ = {};
         pendingPreview_ = RawPreview{};
     }
 }
@@ -105,28 +108,34 @@ void CameraPipeline::setRecordingEnabled(bool enabled, std::string path) {
     wantRecord_ = enabled;
 }
 
-bool CameraPipeline::takeLatestImage(QImage& image, FrameLog& log) {
+bool CameraPipeline::takeLatestImage(PreviewImage& frame) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (latestImage_.isNull()) return false;
-    image = std::move(latestImage_);
-    log = std::move(latestLog_);
-    latestImage_ = QImage();
+    if (latestImage_.image.isNull()) return false;
+    frame = std::move(latestImage_);
+    takenImageLog_ = std::move(latestLog_);
+    latestImage_ = {};
     latestLog_ = {};
     return true;
 }
 
-void CameraPipeline::noteUiSubmitted(FrameLog log) {
+void CameraPipeline::noteUiSubmitted() {
+    FrameLog log;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        log = std::move(takenImageLog_);
+        takenImageLog_ = {};
+    }
     if (!log.enabled) return;
     log.mark(FramePoint::UiSubmitted); // Qt 已调用 setPixmap，不等同于屏幕实际刷新。
     logStats_.addUi(log);
     if (detailLogEnabled_) logWriter_.push("branch=ui " + log.detailLine());
 }
 
-bool CameraPipeline::takeLogSummary(std::string& summary) {
+bool CameraPipeline::takeDiagnostics(PipelineDiagnostics& diagnostics) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (lastLogSummary_.empty()) return false;
-    summary = std::move(lastLogSummary_);
-    lastLogSummary_.clear();
+    if (lastDiagnostics_.detail.empty()) return false;
+    diagnostics = std::move(lastDiagnostics_);
+    lastDiagnostics_ = {};
     return true;
 }
 
@@ -226,6 +235,10 @@ void CameraPipeline::run() {
             copy.height = decoded.height();
             copy.horizontalStride = decoded.horizontalStride();
             copy.verticalStride = decoded.verticalStride();
+            copy.capturePtsUs = static_cast<int64_t>(captured.timestamp.tv_sec) *
+                                1000000 + captured.timestamp.tv_usec;
+            copy.sequence = captured.sequence;
+            copy.timestampFlags = captured.timestamp_flags;
             if (logEnabled_) copy.log = decoded.log();
             const size_t bytes = static_cast<size_t>(copy.horizontalStride) *
                                  copy.verticalStride * 3 / 2;
@@ -342,11 +355,19 @@ void CameraPipeline::run() {
             logStats_.add(frameLog);
             if (detailLogEnabled_)
                 logWriter_.push("branch=main " + frameLog.detailLine());
-            const std::string summary = logStats_.takeSummaryIfDue();
-            if (!summary.empty()) {
-                logWriter_.push(summary);
+            if (auto summary = logStats_.takeSummaryIfDue()) {
+                PipelineDiagnostics diagnostic;
+                auto average = [](const FrameDurationSummary& stat) {
+                    return stat.count ? stat.average_ms : -1.0;
+                };
+                diagnostic.convertMs = average(summary->stages[static_cast<size_t>(FrameStage::Convert)]);
+                diagnostic.encodeMs = average(summary->stages[static_cast<size_t>(FrameStage::Encode)]);
+                diagnostic.rtspWriteMs = average(summary->stages[static_cast<size_t>(FrameStage::RtspWrite)]);
+                diagnostic.captureToUiMs = average(summary->ages[static_cast<size_t>(FrameAge::CaptureToUiSubmitted)]);
+                diagnostic.detail = summary->toLine();
+                logWriter_.push(diagnostic.detail);
                 std::lock_guard<std::mutex> lock(mutex_);
-                lastLogSummary_ = summary;
+                lastDiagnostics_ = std::move(diagnostic);
             }
             if (!logWriter_.healthy() && !logWriteFailureReported) {
                 reportError("诊断日志写入失败：" + logWriter_.path());
@@ -367,8 +388,8 @@ void CameraPipeline::run() {
     }
 
     if (logEnabled_) {
-        const std::string summary = logStats_.takeSummary();
-        if (!summary.empty()) logWriter_.push(summary);
+        if (auto summary = logStats_.takeSummary())
+            logWriter_.push(summary->toLine());
     }
 
     decoded.reset();
@@ -432,7 +453,8 @@ void CameraPipeline::runPreview() {
         if (frame.log.enabled) logStats_.addPreview(frame.log);
         if (preview_) {
             std::lock_guard<std::mutex> lock(mutex_);
-            latestImage_ = std::move(image);
+            latestImage_ = {std::move(image), frame.capturePtsUs,
+                            frame.sequence, frame.timestampFlags};
             latestLog_ = std::move(frame.log);
         }
     }

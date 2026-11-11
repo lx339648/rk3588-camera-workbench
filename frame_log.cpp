@@ -149,42 +149,57 @@ void FrameLogStats::addUi(const FrameLog& frame) {
         durations_[kStageDurations.size() + 2].add(*ms);
 }
 
-std::string FrameLogStats::summaryLocked(int64_t now_ns) {
+std::optional<FrameLogSummary> FrameLogStats::summaryLocked(int64_t now_ns) {
     if (frames_ == 0) {
         window_start_ns_ = now_ns;
-        return {};
+        return std::nullopt;
     }
-    std::ostringstream out;
+    FrameLogSummary summary;
+    summary.frames = frames_;
     const double elapsed_seconds = window_start_ns_ >= 0 && now_ns > window_start_ns_
         ? static_cast<double>(now_ns - window_start_ns_) / 1000000000.0 : 0.0;
-    out << std::fixed << std::setprecision(2) << "frames=" << frames_;
     // 手动立即取出统计时，窗口可能只有几微秒；这种 FPS 没有参考价值。
-    if (elapsed_seconds >= 0.1) out << " fps=" << frames_ / elapsed_seconds;
+    if (elapsed_seconds >= 0.1) summary.fps = frames_ / elapsed_seconds;
     for (std::size_t i = 0; i < durations_.size(); ++i) {
         const auto& stat = durations_[i];
         if (stat.count == 0) continue;
-        const char* name = i < kStageDurations.size()
-            ? kStageDurations[i].name : kAgeNames[i - kStageDurations.size()];
-        out << ' ' << name << "[n=" << stat.count
-            << ",avg=" << stat.total_ms / stat.count
-            << "ms,max=" << stat.max_ms << "ms]";
+        FrameDurationSummary value{stat.count, stat.total_ms / stat.count, stat.max_ms};
+        if (i < kStageDurations.size()) summary.stages[i] = value;
+        else summary.ages[i - kStageDurations.size()] = value;
     }
     durations_ = {};
     frames_ = 0;
     window_start_ns_ = now_ns;
+    return summary;
+}
+
+std::string FrameLogSummary::toLine() const {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(2) << "frames=" << frames;
+    if (fps) out << " fps=" << *fps;
+    auto append = [&out](const char* name, const FrameDurationSummary& value) {
+        if (value.count == 0) return;
+        out << ' ' << name << "[n=" << value.count
+            << ",avg=" << value.average_ms
+            << "ms,max=" << value.max_ms << "ms]";
+    };
+    for (std::size_t i = 0; i < stages.size(); ++i)
+        append(kStageDurations[i].name, stages[i]);
+    for (std::size_t i = 0; i < ages.size(); ++i)
+        append(kAgeNames[i], ages[i]);
     return out.str();
 }
 
-std::string FrameLogStats::takeSummaryIfDue() {
+std::optional<FrameLogSummary> FrameLogStats::takeSummaryIfDue() {
     const int64_t now_ns = frameMonotonicNs();
-    if (now_ns < 0) return {};
+    if (now_ns < 0) return std::nullopt;
     std::lock_guard<std::mutex> lock(mutex_);
     if (window_start_ns_ < 0) window_start_ns_ = now_ns;
-    if (now_ns - window_start_ns_ < interval_ns_) return {};
+    if (now_ns - window_start_ns_ < interval_ns_) return std::nullopt;
     return summaryLocked(now_ns);
 }
 
-std::string FrameLogStats::takeSummary() {
+std::optional<FrameLogSummary> FrameLogStats::takeSummary() {
     const int64_t now_ns = frameMonotonicNs();
     std::lock_guard<std::mutex> lock(mutex_);
     return summaryLocked(now_ns);

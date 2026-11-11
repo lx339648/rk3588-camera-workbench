@@ -11,6 +11,22 @@
 #include <thread>
 #include <vector>
 
+// 界面只接触画面与采集元数据，不需要持有内部逐帧日志。
+struct PreviewImage {
+    QImage image;
+    int64_t capturePtsUs = -1; // V4L2 时间戳；不一定是日历时间
+    uint32_t sequence = 0;
+    uint32_t timestampFlags = 0;
+};
+
+struct PipelineDiagnostics {
+    double convertMs = -1;
+    double encodeMs = -1;
+    double rtspWriteMs = -1;
+    double captureToUiMs = -1;
+    std::string detail; // 文件日志同一统计窗口的完整文字，仅用于提示
+};
+
 // 工作线程独占摄像头、MPP 和 RTSP；Qt 主线程只读取已复制的最新画面。
 class CameraPipeline {
 public:
@@ -24,9 +40,9 @@ public:
     void setPreviewEnabled(bool enabled);
     void setStreamingEnabled(bool enabled, std::string url);
     void setRecordingEnabled(bool enabled, std::string path);
-    bool takeLatestImage(QImage& image, FrameLog& log);
-    void noteUiSubmitted(FrameLog log);
-    bool takeLogSummary(std::string& summary);
+    bool takeLatestImage(PreviewImage& frame);
+    void noteUiSubmitted();
+    bool takeDiagnostics(PipelineDiagnostics& diagnostics);
     std::string logPath();
     bool logEnabled() const { return logEnabled_.load(); }
     bool takeError(std::string& error);
@@ -49,6 +65,9 @@ private:
         int height = 0;
         int horizontalStride = 0;
         int verticalStride = 0;
+        int64_t capturePtsUs = -1;
+        uint32_t sequence = 0;
+        uint32_t timestampFlags = 0;
         FrameLog log;
     };
 
@@ -70,9 +89,10 @@ private:
     std::mutex mutex_;
     std::condition_variable previewReady_;
     RawPreview pendingPreview_;
-    QImage latestImage_;
+    PreviewImage latestImage_;
     FrameLog latestLog_;
-    std::string lastLogSummary_;
+    FrameLog takenImageLog_;
+    PipelineDiagnostics lastDiagnostics_;
     std::string logPath_;
     std::string streamUrl_;
     std::string recordPath_;

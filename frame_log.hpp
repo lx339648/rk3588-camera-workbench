@@ -69,18 +69,42 @@ int64_t frameMonotonicNs();
 // 机器当前 UTC 时间，单位微秒；不能用于计算处理耗时。
 int64_t frameRealtimeUs();
 
-// 每个完整分支使用一个统计器。add() 只累计数字，不做终端或 Qt 输出。
-// takeSummaryIfDue() 每隔 interval_ms 至多生成一条汇总文本。
-class FrameLogStats {
-public:
+// 统计结果是普通 C++ 数据；文件日志和界面可各自决定如何展示。
+struct FrameDurationSummary {
+    uint64_t count = 0;
+    double average_ms = 0;
+    double max_ms = 0;
+};
+
+enum class FrameStage : std::size_t {
+    Wait, Copy, Requeue, Decode, Convert, Encode, Record, RtspWrite,
+    PreviewConvert, PreviewToUi, UiQueue
+};
+enum class FrameAge : std::size_t {
+    CaptureToEncoded, CaptureToRtsp, CaptureToUiSubmitted
+};
+
+struct FrameLogSummary {
     static constexpr std::size_t kStageCount = 11;
     static constexpr std::size_t kAgeCount = 3;
+    uint64_t frames = 0;
+    std::optional<double> fps;
+    std::array<FrameDurationSummary, kStageCount> stages{};
+    std::array<FrameDurationSummary, kAgeCount> ages{};
+    std::string toLine() const; // 文件日志和诊断详情使用的文本格式
+};
+
+// 每个完整分支使用一个统计器。add() 只累计数字，不做终端或 Qt 输出。
+class FrameLogStats {
+public:
+    static constexpr std::size_t kStageCount = FrameLogSummary::kStageCount;
+    static constexpr std::size_t kAgeCount = FrameLogSummary::kAgeCount;
     explicit FrameLogStats(int64_t interval_ms = 1000);
     void add(const FrameLog& frame);
     void addPreview(const FrameLog& frame);
     void addUi(const FrameLog& frame);
-    std::string takeSummaryIfDue();
-    std::string takeSummary(); // 手动取出并清空当前统计窗口
+    std::optional<FrameLogSummary> takeSummaryIfDue();
+    std::optional<FrameLogSummary> takeSummary(); // 手动取出并清空当前统计窗口
 
 private:
     struct DurationStat {
@@ -91,7 +115,7 @@ private:
     };
 
     static constexpr std::size_t kDurationCount = kStageCount + kAgeCount;
-    std::string summaryLocked(int64_t now_ns);
+    std::optional<FrameLogSummary> summaryLocked(int64_t now_ns);
 
     std::mutex mutex_;
     std::array<DurationStat, kDurationCount> durations_{};
