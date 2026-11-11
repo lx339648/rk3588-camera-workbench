@@ -17,7 +17,6 @@
 #include <QListWidget>
 #include <QProcess>
 #include <QPushButton>
-#include <QPixmap>
 #include <QSlider>
 #include <QSignalBlocker>
 #include <QSettings>
@@ -161,9 +160,13 @@ QWidget* MainWindow::createSidebar() {
         if (on) {
             pipeline_.start(); // 摄像头与解码器在工作线程初始化。
             powerOn_ = true;
-            logPathLabel_->setText(pipeline_.logEnabled()
-                ? "日志文件：" + QString::fromStdString(pipeline_.logPath())
-                : "帧日志已关闭（设置 CAMERA_FRAME_LOG=1 可开启）");
+            logPathLabel_->setText(
+                (pipeline_.logEnabled()
+                    ? "主链路日志：" + QString::fromStdString(pipeline_.logPath())
+                    : "主链路日志已关闭（CAMERA_FRAME_LOG=0）") + "\n" +
+                (qtPreviewLog_.enabled()
+                    ? "Qt 预览日志：" + qtPreviewLog_.path()
+                    : "Qt 预览日志未启用或无法创建（CAMERA_QT_PREVIEW_LOG=0 可关闭）"));
         } else {
             serverReadyTimer_->stop();
             if (player_) player_->stop();
@@ -821,9 +824,8 @@ void MainWindow::updateCameraView() {
     if (!powerOn_ || !previewOn_ || currentPage_ != 0) return;
     PreviewImage frame;
     if (pipeline_.takeLatestImage(frame)) {
-        const QPixmap pixmap = QPixmap::fromImage(std::move(frame.image));
-        videoLabel_->setPixmap(pixmap.scaled(videoLabel_->size(),
-            Qt::KeepAspectRatio, Qt::FastTransformation));
+        qtPreviewLog_.present(videoLabel_, std::move(frame.image),
+                              frame.sequence, frame.capturePtsUs);
         pipeline_.noteUiSubmitted();
         ++previewFramesInWindow_;
     }

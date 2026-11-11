@@ -33,6 +33,8 @@ add_executable(qt_window
     main.cpp
     main_window.cpp
     main_window.hpp
+    qt_preview_log.cpp
+    qt_preview_log.hpp
     ../capture_v4l2.cpp
     ../frame_log.cpp
     ../nv12_frame.cpp

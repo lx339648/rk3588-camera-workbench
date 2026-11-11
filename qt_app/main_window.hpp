@@ -1,6 +1,7 @@
 #pragma once
 
 #include "camera_pipeline.hpp"
+#include "qt_preview_log.hpp"
 #include <QElapsedTimer>
 #include <QMainWindow>
 #include <QSet>
@@ -70,6 +71,7 @@ private:
     QTimer* serverReadyTimer_ = nullptr;
     QProcess* mediaMtx_ = nullptr;
     CameraPipeline pipeline_;
+    QtPreviewLog qtPreviewLog_;
 
     int currentPage_ = 0;
     bool powerOn_ = false;
