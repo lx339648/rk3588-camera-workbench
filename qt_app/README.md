@@ -4,7 +4,7 @@
 `capture_v4l2`、RGA 格式转换、MPP 编码和 `rtsp_publisher`，不另开摄像头。
 
 ```bash
-cd ~/lx_ws/hard_camera
+cd ~/lx_ws/C405_Log_camera
 cmake -S qt_app -B qt_app/build
 cmake --build qt_app/build -j2
 ./qt_app/build/qt_window
@@ -44,6 +44,16 @@ MPP 若未安装在常见位置，可以在
 Qt 预览另有独立日志 `qt_preview_*.log`，设置页会显示路径。它每秒统计
 `from_image`（`QImage` 转 `QPixmap`）、`scale`（缩放）和 `set_pixmap`
 （提交给 `QLabel`）各自的平均值与最大值，包含最后一帧的采集序号和 PTS。
+另外统计 `tick_interval`（Qt 定时器的实际回调间隔）、`ui_callback`
+（整个 `updateCameraView()` 回调耗时）、`ticks` / `frames` / `empty_ticks`
+（回调次数、提交新画面次数、没有新画面的次数）。`seq_skipped` 是相邻已显示
+采集序号之间跳过的帧数；`preview_replace_pending` 是待转换 NV12 槽被覆盖
+的次数，`preview_replace_ready` 是待界面取走的 QImage 槽被覆盖的次数。
+这些数值只在实时预览页开启时按秒汇总，不在每帧写盘；切走页面会结束当前
+统计窗口。每个耗时项的 `n` 是该窗口内的样本数，首个回调没有间隔样本。
+定时器约每秒检查 60 次而相机每秒只出约 30 帧，所以 `empty_ticks` 不为零
+是正常现象，不能直接当成丢帧数。`seq_skipped` 说明已显示画面序号有缺口，
+但单凭它不能判断缺口发生在哪个环节。
 写文件由单独线程完成。设置 `CAMERA_QT_PREVIEW_LOG=0` 可单独关闭此日志，
 不会影响主链路诊断；`setPixmap` 耗时不包括之后的实际屏幕绘制。
 

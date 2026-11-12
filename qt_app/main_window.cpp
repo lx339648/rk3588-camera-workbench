@@ -763,6 +763,9 @@ void MainWindow::stopOwnedServer() {
 }
 
 void MainWindow::updateCameraView() {
+    const PreviewDropStats drops = pipeline_.previewDropStats();
+    qtPreviewLog_.beginTick(powerOn_ && previewOn_ && currentPage_ == 0,
+                            drops.pendingOverwrites, drops.readyOverwrites);
     std::string error;
     PipelineDiagnostics diagnostic;
     if (pipeline_.takeDiagnostics(diagnostic)) {
@@ -821,7 +824,10 @@ void MainWindow::updateCameraView() {
     if (recording_) recordButton_->setText(
         pipeline_.recording() ? "停止录制" : "等待关键帧，准备录制…");
 
-    if (!powerOn_ || !previewOn_ || currentPage_ != 0) return;
+    if (!powerOn_ || !previewOn_ || currentPage_ != 0) {
+        qtPreviewLog_.endTick();
+        return;
+    }
     PreviewImage frame;
     if (pipeline_.takeLatestImage(frame)) {
         qtPreviewLog_.present(videoLabel_, std::move(frame.image),
@@ -839,4 +845,5 @@ void MainWindow::updateCameraView() {
         lastCaptureCount_ = captureCount;
         previewFramesInWindow_ = 0;
     }
+    qtPreviewLog_.endTick();
 }

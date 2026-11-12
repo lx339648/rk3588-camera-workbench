@@ -19,6 +19,12 @@ struct PreviewImage {
     uint32_t timestampFlags = 0;
 };
 
+// 预览分支的累计覆盖次数；只提供数值，不依赖 Qt 日志实现。
+struct PreviewDropStats {
+    uint64_t pendingOverwrites = 0; // 尚未转换的 NV12 被新帧替换
+    uint64_t readyOverwrites = 0;   // 尚未被界面取走的 QImage 被新帧替换
+};
+
 struct PipelineDiagnostics {
     double convertMs = -1;
     double encodeMs = -1;
@@ -52,6 +58,9 @@ public:
     bool alive() const { return alive_.load(); }
     bool finished() const { return finished_.load(); }
     uint64_t capturedFrames() const { return capturedFrames_.load(); }
+    PreviewDropStats previewDropStats() const {
+        return {pendingPreviewOverwrites_.load(), readyImageOverwrites_.load()};
+    }
 
 private:
     void run();
@@ -77,6 +86,8 @@ private:
     std::atomic<bool> alive_{false};
     std::atomic<bool> finished_{false};
     std::atomic<uint64_t> capturedFrames_{0};
+    std::atomic<uint64_t> pendingPreviewOverwrites_{0};
+    std::atomic<uint64_t> readyImageOverwrites_{0};
     std::atomic<bool> preview_{false};
     std::atomic<bool> wantStream_{false};
     std::atomic<bool> streaming_{false};

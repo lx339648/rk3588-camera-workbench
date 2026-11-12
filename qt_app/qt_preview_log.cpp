@@ -14,6 +14,7 @@
 #include <utility>
 
 void QtPreviewLog::Stage::add(uint64_t ns) {
+    ++samples;
     total_ns += ns;
     max_ns = std::max(max_ns, ns);
 }
@@ -60,6 +61,47 @@ QtPreviewLog::~QtPreviewLog() {
     file_.close();
 }
 
+void QtPreviewLog::beginTick(bool live, uint64_t pending_overwrites,
+                              uint64_t ready_overwrites) {
+    if (!enabled_) return;
+    if (!live) {
+        if (ticks_ > 0) flushSummary();
+        summaryClock_.invalidate();
+        tickClock_.invalidate();
+        callbackClock_.invalidate();
+        tickActive_ = false;
+        dropBaselineValid_ = false;
+        lastSequenceValid_ = false;
+        return;
+    }
+
+    if (!summaryClock_.isValid()) summaryClock_.start();
+    if (tickClock_.isValid())
+        tickInterval_.add(static_cast<uint64_t>(tickClock_.nsecsElapsed()));
+    tickClock_.restart();
+    callbackClock_.start();
+    tickActive_ = true;
+    ++ticks_;
+
+    if (dropBaselineValid_) {
+        // 计数器在重新启动摄像头时清零；新的基线从本次开始。
+        if (pending_overwrites >= previousPendingOverwrites_)
+            pendingOverwrites_ += pending_overwrites - previousPendingOverwrites_;
+        if (ready_overwrites >= previousReadyOverwrites_)
+            readyOverwrites_ += ready_overwrites - previousReadyOverwrites_;
+    }
+    previousPendingOverwrites_ = pending_overwrites;
+    previousReadyOverwrites_ = ready_overwrites;
+    dropBaselineValid_ = true;
+}
+
+void QtPreviewLog::endTick() {
+    if (!enabled_ || !tickActive_) return;
+    callbackTime_.add(static_cast<uint64_t>(callbackClock_.nsecsElapsed()));
+    tickActive_ = false;
+    if (summaryClock_.elapsed() >= 1000) flushSummary();
+}
+
 void QtPreviewLog::present(QLabel* label, QImage&& image,
                            uint32_t sequence, int64_t capture_pts_us) {
     if (!label) return;
@@ -79,35 +121,54 @@ void QtPreviewLog::present(QLabel* label, QImage&& image,
     label->setPixmap(scaled);
     const qint64 submittedNs = timer.nsecsElapsed();
 
-    if (!summaryClock_.isValid()) summaryClock_.start();
     ++frames_;
+    if (lastSequenceValid_) {
+        const uint32_t advance = sequence - lastSequence_; // 允许 uint32_t 正常回绕
+        if (advance > 1 && advance < 10000) skippedSequences_ += advance - 1;
+        else if (advance >= 10000) ++sequenceResets_;
+    }
+    lastSequenceValid_ = true;
     lastSequence_ = sequence;
     lastPtsUs_ = capture_pts_us;
     fromImage_.add(static_cast<uint64_t>(convertedNs));
     scale_.add(static_cast<uint64_t>(scaledNs - convertedNs));
     setPixmap_.add(static_cast<uint64_t>(submittedNs - scaledNs));
-    if (summaryClock_.elapsed() >= 1000) flushSummary();
 }
 
 void QtPreviewLog::flushSummary() {
-    if (frames_ == 0) return;
+    if (ticks_ == 0) return;
     std::ostringstream line;
     line << std::fixed << std::setprecision(2)
          << "utc=" << QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs).toStdString()
+         << " ticks=" << ticks_
          << " frames=" << frames_
+         << " empty_ticks=" << (ticks_ - frames_)
+         << " seq_skipped=" << skippedSequences_
+         << " seq_resets=" << sequenceResets_
+         << " preview_replace_pending=" << pendingOverwrites_
+         << " preview_replace_ready=" << readyOverwrites_
          << " last_seq=" << lastSequence_
          << " last_pts_us=" << lastPtsUs_;
-    auto append = [&line, this](const char* name, const Stage& stage) {
+    auto append = [&line](const char* name, const Stage& stage) {
         line << ' ' << name << "[avg="
-             << static_cast<double>(stage.total_ns) / frames_ / 1000000.0
+             << (stage.samples ? static_cast<double>(stage.total_ns) / stage.samples / 1000000.0 : 0.0)
              << "ms,max=" << static_cast<double>(stage.max_ns) / 1000000.0
-             << "ms]";
+             << "ms,n=" << stage.samples << ']';
     };
+    append("tick_interval", tickInterval_);
+    append("ui_callback", callbackTime_);
     append("from_image", fromImage_);
     append("scale", scale_);
     append("set_pixmap", setPixmap_);
     enqueue(line.str());
+    ticks_ = 0;
     frames_ = 0;
+    skippedSequences_ = 0;
+    sequenceResets_ = 0;
+    pendingOverwrites_ = 0;
+    readyOverwrites_ = 0;
+    tickInterval_ = {};
+    callbackTime_ = {};
     fromImage_ = {};
     scale_ = {};
     setPixmap_ = {};

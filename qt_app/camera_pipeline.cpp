@@ -55,6 +55,8 @@ void CameraPipeline::start() {
     requested_ = true;
     finished_ = false;
     capturedFrames_ = 0;
+    pendingPreviewOverwrites_ = 0;
+    readyImageOverwrites_ = 0;
     previewThread_ = std::thread(&CameraPipeline::runPreview, this);
     thread_ = std::thread(&CameraPipeline::run, this);
 }
@@ -253,6 +255,7 @@ void CameraPipeline::run() {
             mpp_buffer_sync_end(buffer);
             if (preview_) {
                 std::lock_guard<std::mutex> lock(mutex_);
+                if (!pendingPreview_.nv12.empty()) ++pendingPreviewOverwrites_;
                 pendingPreview_ = std::move(copy); // 仅保留最新待转换帧。
             }
             previewReady_.notify_one();
@@ -453,6 +456,7 @@ void CameraPipeline::runPreview() {
         if (frame.log.enabled) logStats_.addPreview(frame.log);
         if (preview_) {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (!latestImage_.image.isNull()) ++readyImageOverwrites_;
             latestImage_ = {std::move(image), frame.capturePtsUs,
                             frame.sequence, frame.timestampFlags};
             latestLog_ = std::move(frame.log);

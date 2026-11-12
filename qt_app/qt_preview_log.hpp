@@ -25,11 +25,16 @@ public:
 
     void present(QLabel* label, QImage&& image, uint32_t sequence,
                  int64_t capture_pts_us);
+    // 一次 Qt 定时器回调的入口/出口；覆盖数由预览分支累计后传入。
+    void beginTick(bool live, uint64_t pending_overwrites,
+                   uint64_t ready_overwrites);
+    void endTick();
     bool enabled() const { return enabled_; }
     const QString& path() const { return path_; }
 
 private:
     struct Stage {
+        uint64_t samples = 0;
         uint64_t total_ns = 0;
         uint64_t max_ns = 0;
         void add(uint64_t ns);
@@ -42,12 +47,26 @@ private:
     bool enabled_ = false;
     QString path_;
     QElapsedTimer summaryClock_;
+    QElapsedTimer tickClock_;
+    QElapsedTimer callbackClock_;
+    bool tickActive_ = false;
+    bool dropBaselineValid_ = false;
+    bool lastSequenceValid_ = false;
+    uint64_t previousPendingOverwrites_ = 0;
+    uint64_t previousReadyOverwrites_ = 0;
+    uint64_t pendingOverwrites_ = 0;
+    uint64_t readyOverwrites_ = 0;
+    uint64_t skippedSequences_ = 0;
+    uint64_t sequenceResets_ = 0;
+    uint64_t ticks_ = 0;
     uint64_t frames_ = 0;
     uint32_t lastSequence_ = 0;
     int64_t lastPtsUs_ = -1;
     Stage fromImage_;
     Stage scale_;
     Stage setPixmap_;
+    Stage tickInterval_;
+    Stage callbackTime_;
 
     std::ofstream file_;
     std::thread writer_;
