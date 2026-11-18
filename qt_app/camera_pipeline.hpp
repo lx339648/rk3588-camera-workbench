@@ -1,6 +1,5 @@
 #pragma once
 
-#include <QImage>
 #include "frame_log.hpp"
 
 #include <atomic>
@@ -13,7 +12,11 @@
 
 // 界面只接触画面与采集元数据，不需要持有内部逐帧日志。
 struct PreviewImage {
-    QImage image;
+    std::vector<uint8_t> nv12;
+    int width = 0;
+    int height = 0;
+    int horizontalStride = 0;
+    int verticalStride = 0;
     int64_t capturePtsUs = -1; // V4L2 时间戳；不一定是日历时间
     uint32_t sequence = 0;
     uint32_t timestampFlags = 0;
@@ -22,7 +25,7 @@ struct PreviewImage {
 // 预览分支的累计覆盖次数；只提供数值，不依赖 Qt 日志实现。
 struct PreviewDropStats {
     uint64_t pendingOverwrites = 0; // 尚未转换的 NV12 被新帧替换
-    uint64_t readyOverwrites = 0;   // 尚未被界面取走的 QImage 被新帧替换
+    uint64_t readyOverwrites = 0;   // 尚未被界面取走的 NV12 被新帧替换
 };
 
 struct PipelineDiagnostics {

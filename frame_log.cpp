@@ -33,7 +33,7 @@ constexpr std::array<DurationDefinition, FrameLogStats::kStageCount> kStageDurat
     {"encode", FramePoint::EncodeStart, FramePoint::Encoded},
     {"record", FramePoint::RecordStart, FramePoint::Recorded},
     {"rtsp_write", FramePoint::RtspStart, FramePoint::RtspWritten},
-    {"preview_convert", FramePoint::PreviewStart, FramePoint::PreviewReady},
+    {"preview_handoff", FramePoint::PreviewStart, FramePoint::PreviewReady},
     {"preview_to_ui", FramePoint::PreviewReady, FramePoint::UiSubmitted},
     {"ui_queue", FramePoint::UiSubmitted, FramePoint::UiPainted}
 }};

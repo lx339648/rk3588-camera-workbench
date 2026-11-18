@@ -4,9 +4,9 @@ project(qt_window LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia MultimediaWidgets Network)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia MultimediaWidgets Network OpenGL OpenGLWidgets)
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale)
+pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil)
 find_path(MPP_INCLUDE_DIR rk_mpi.h
     HINTS ${CMAKE_CURRENT_SOURCE_DIR}/../../mpp/inc
           /usr/include/rockchip /usr/local/include/rockchip)
@@ -33,6 +33,8 @@ add_executable(qt_window
     main.cpp
     main_window.cpp
     main_window.hpp
+    nv12_preview_widget.cpp
+    nv12_preview_widget.hpp
     qt_preview_log.cpp
     qt_preview_log.hpp
     ../capture_v4l2.cpp
@@ -45,6 +47,6 @@ add_executable(qt_window
 )
 
 target_include_directories(qt_window PRIVATE .. ${MPP_INCLUDE_DIR} ${RGA_INCLUDE_DIR})
-target_link_libraries(qt_window PRIVATE Qt6::Widgets Qt6::Multimedia
+target_link_libraries(qt_window PRIVATE Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Multimedia
     Qt6::MultimediaWidgets Qt6::Network ${MPP_LIBRARY} ${RGA_LIBRARY}
     PkgConfig::LIBAV pthread)

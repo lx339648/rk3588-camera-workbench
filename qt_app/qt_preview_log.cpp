@@ -2,8 +2,6 @@
 
 #include <QCoreApplication>
 #include <QDateTime>
-#include <QLabel>
-#include <QPixmap>
 
 #include <algorithm>
 #include <cstdlib>
@@ -102,25 +100,9 @@ void QtPreviewLog::endTick() {
     if (summaryClock_.elapsed() >= 1000) flushSummary();
 }
 
-void QtPreviewLog::present(QLabel* label, QImage&& image,
-                           uint32_t sequence, int64_t capture_pts_us) {
-    if (!label) return;
-    if (!enabled_) {
-        const QPixmap pixmap = QPixmap::fromImage(std::move(image));
-        label->setPixmap(pixmap.scaled(label->size(),
-            Qt::KeepAspectRatio, Qt::FastTransformation));
-        return;
-    }
-    QElapsedTimer timer;
-    timer.start();
-    QPixmap pixmap = QPixmap::fromImage(std::move(image));
-    const qint64 convertedNs = timer.nsecsElapsed();
-    QPixmap scaled = pixmap.scaled(label->size(),
-        Qt::KeepAspectRatio, Qt::FastTransformation);
-    const qint64 scaledNs = timer.nsecsElapsed();
-    label->setPixmap(scaled);
-    const qint64 submittedNs = timer.nsecsElapsed();
-
+void QtPreviewLog::noteGlSubmitted(uint32_t sequence, int64_t capture_pts_us,
+                                   uint64_t enqueue_ns) {
+    if (!enabled_) return;
     ++frames_;
     if (lastSequenceValid_) {
         const uint32_t advance = sequence - lastSequence_; // 允许 uint32_t 正常回绕
@@ -130,9 +112,15 @@ void QtPreviewLog::present(QLabel* label, QImage&& image,
     lastSequenceValid_ = true;
     lastSequence_ = sequence;
     lastPtsUs_ = capture_pts_us;
-    fromImage_.add(static_cast<uint64_t>(convertedNs));
-    scale_.add(static_cast<uint64_t>(scaledNs - convertedNs));
-    setPixmap_.add(static_cast<uint64_t>(submittedNs - scaledNs));
+    glEnqueue_.add(enqueue_ns);
+}
+
+void QtPreviewLog::noteGlPaint(uint64_t paint_ns) {
+    if (enabled_) glPaint_.add(paint_ns);
+}
+
+void QtPreviewLog::noteGlCompose(uint64_t compose_ns) {
+    if (enabled_) glCompose_.add(compose_ns);
 }
 
 void QtPreviewLog::flushSummary() {
@@ -157,9 +145,9 @@ void QtPreviewLog::flushSummary() {
     };
     append("tick_interval", tickInterval_);
     append("ui_callback", callbackTime_);
-    append("from_image", fromImage_);
-    append("scale", scale_);
-    append("set_pixmap", setPixmap_);
+    append("gl_enqueue", glEnqueue_);
+    append("gl_paint_cpu", glPaint_);
+    append("gl_compose_swap", glCompose_);
     enqueue(line.str());
     ticks_ = 0;
     frames_ = 0;
@@ -169,9 +157,9 @@ void QtPreviewLog::flushSummary() {
     readyOverwrites_ = 0;
     tickInterval_ = {};
     callbackTime_ = {};
-    fromImage_ = {};
-    scale_ = {};
-    setPixmap_ = {};
+    glEnqueue_ = {};
+    glPaint_ = {};
+    glCompose_ = {};
     summaryClock_.restart();
 }
 

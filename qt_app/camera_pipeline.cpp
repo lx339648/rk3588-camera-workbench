@@ -6,11 +6,6 @@
 #include "mkv_recorder.hpp"
 #include "rtsp_publisher.hpp"
 
-extern "C" {
-#include <libswscale/swscale.h>
-#include <libavutil/pixfmt.h>
-}
-
 #include <utility>
 #include <vector>
 #include <cstring>
@@ -112,7 +107,7 @@ void CameraPipeline::setRecordingEnabled(bool enabled, std::string path) {
 
 bool CameraPipeline::takeLatestImage(PreviewImage& frame) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (latestImage_.image.isNull()) return false;
+    if (latestImage_.nv12.empty()) return false;
     frame = std::move(latestImage_);
     takenImageLog_ = std::move(latestLog_);
     latestImage_ = {};
@@ -128,7 +123,7 @@ void CameraPipeline::noteUiSubmitted() {
         takenImageLog_ = {};
     }
     if (!log.enabled) return;
-    log.mark(FramePoint::UiSubmitted); // Qt 已调用 setPixmap，不等同于屏幕实际刷新。
+    log.mark(FramePoint::UiSubmitted); // Qt 已请求 OpenGL 绘制，不等同于屏幕实际刷新。
     logStats_.addUi(log);
     if (detailLogEnabled_) logWriter_.push("branch=ui " + log.detailLine());
 }
@@ -411,7 +406,6 @@ void CameraPipeline::run() {
 }
 
 void CameraPipeline::runPreview() {
-    SwsContext* scaler = nullptr;
     for (;;) {
         RawPreview frame;
         {
@@ -423,44 +417,16 @@ void CameraPipeline::runPreview() {
             frame = std::move(pendingPreview_);
             pendingPreview_ = RawPreview{};
         }
-        const int outWidth = frame.width;
-        const int outHeight = frame.height;
-        scaler = sws_getCachedContext(scaler, frame.width, frame.height,
-            AV_PIX_FMT_NV12, outWidth, outHeight, AV_PIX_FMT_RGB24,
-            SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
-        QImage image(outWidth, outHeight, QImage::Format_RGB888);
-        if (!scaler || image.isNull()) {
-            if (logEnabled_) logWriter_.push(
-                "error_stage=preview_convert message=创建预览图像或颜色转换器失败 " +
-                frame.log.detailLine());
-            reportError("创建预览图像或颜色转换器失败");
-            continue;
-        }
         frame.log.mark(FramePoint::PreviewStart);
-        const uint8_t* src[] = {
-            frame.nv12.data(),
-            frame.nv12.data() + frame.horizontalStride * frame.verticalStride
-        };
-        const int srcStride[] = {frame.horizontalStride, frame.horizontalStride};
-        uint8_t* dst[] = {image.bits()};
-        const int dstStride[] = {static_cast<int>(image.bytesPerLine())};
-        if (sws_scale(scaler, src, srcStride, 0, frame.height,
-                      dst, dstStride) != outHeight) {
-            if (logEnabled_) logWriter_.push(
-                "error_stage=preview_convert message=NV12 转 RGB 失败 " +
-                frame.log.detailLine());
-            reportError("NV12 转 RGB 失败");
-            continue;
-        }
         frame.log.mark(FramePoint::PreviewReady);
         if (frame.log.enabled) logStats_.addPreview(frame.log);
         if (preview_) {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!latestImage_.image.isNull()) ++readyImageOverwrites_;
-            latestImage_ = {std::move(image), frame.capturePtsUs,
-                            frame.sequence, frame.timestampFlags};
+            if (!latestImage_.nv12.empty()) ++readyImageOverwrites_;
+            latestImage_ = {std::move(frame.nv12), frame.width, frame.height,
+                            frame.horizontalStride, frame.verticalStride,
+                            frame.capturePtsUs, frame.sequence, frame.timestampFlags};
             latestLog_ = std::move(frame.log);
         }
     }
-    if (scaler) sws_freeContext(scaler);
 }

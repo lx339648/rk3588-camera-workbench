@@ -1,7 +1,6 @@
 #pragma once
 
 #include <QElapsedTimer>
-#include <QImage>
 #include <QString>
 
 #include <condition_variable>
@@ -12,8 +11,6 @@
 #include <string>
 #include <thread>
 
-class QLabel;
-
 // 只负责 Qt 预览的显示与计时；不接触 V4L2、MPP 或主链路 FrameLog。
 // present() 只能在 Qt 主线程调用，文件写入由自己的后台线程完成。
 class QtPreviewLog {
@@ -23,8 +20,10 @@ public:
     QtPreviewLog(const QtPreviewLog&) = delete;
     QtPreviewLog& operator=(const QtPreviewLog&) = delete;
 
-    void present(QLabel* label, QImage&& image, uint32_t sequence,
-                 int64_t capture_pts_us);
+    // OpenGL 更新请求返回时记录；绘制和窗口交换发生在此之后。
+    void noteGlSubmitted(uint32_t sequence, int64_t capture_pts_us, uint64_t enqueue_ns);
+    void noteGlPaint(uint64_t paint_ns);
+    void noteGlCompose(uint64_t compose_ns);
     // 一次 Qt 定时器回调的入口/出口；覆盖数由预览分支累计后传入。
     void beginTick(bool live, uint64_t pending_overwrites,
                    uint64_t ready_overwrites);
@@ -62,9 +61,9 @@ private:
     uint64_t frames_ = 0;
     uint32_t lastSequence_ = 0;
     int64_t lastPtsUs_ = -1;
-    Stage fromImage_;
-    Stage scale_;
-    Stage setPixmap_;
+    Stage glEnqueue_;
+    Stage glPaint_;
+    Stage glCompose_;
     Stage tickInterval_;
     Stage callbackTime_;
 

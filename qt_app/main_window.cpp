@@ -1,4 +1,5 @@
 #include "main_window.hpp"
+#include "nv12_preview_widget.hpp"
 
 #include <QButtonGroup>
 #include <QDateTime>
@@ -178,6 +179,8 @@ QWidget* MainWindow::createSidebar() {
             previewOn_ = false;
             playing_ = false;
             videoLabel_->clear();
+            glPreview_->clearFrame();
+            videoViews_->setCurrentWidget(videoLabel_);
             fpsClock_.invalidate();
             fpsLabel_->setText("采集 -- / 预览 -- fps");
             diagnosticLabel_->setText("诊断：等待采集");
@@ -224,6 +227,18 @@ QWidget* MainWindow::createMediaPage() {
     videoLabel_->setObjectName("videoHint");
     videoLabel_->setAlignment(Qt::AlignCenter);
     videoViews_->addWidget(videoLabel_);
+    glPreview_ = new Nv12PreviewWidget(videoSurface);
+    glPreview_->setPaintObserver([this](uint64_t ns) { qtPreviewLog_.noteGlPaint(ns); });
+    connect(glPreview_, &QOpenGLWidget::aboutToCompose, this, [this] {
+        if (qtPreviewLog_.enabled()) glComposeClock_.start();
+    });
+    connect(glPreview_, &QOpenGLWidget::frameSwapped, this, [this] {
+        if (qtPreviewLog_.enabled() && glComposeClock_.isValid()) {
+            qtPreviewLog_.noteGlCompose(static_cast<uint64_t>(glComposeClock_.nsecsElapsed()));
+            glComposeClock_.invalidate();
+        }
+    });
+    videoViews_->addWidget(glPreview_);
     surfaceLayout->addWidget(videoViews_);
     videoCardLayout->addWidget(videoSurface, 1);
 
@@ -292,6 +307,8 @@ QWidget* MainWindow::createLivePanel() {
                 recording_ = false;
             }
             videoLabel_->clear();
+            glPreview_->clearFrame();
+            videoViews_->setCurrentWidget(videoLabel_);
         }
         refreshUi();
     });
@@ -395,7 +412,7 @@ QWidget* MainWindow::createFilesPanel() {
                 playbackPath_ = path;
                 player_->setSource(QUrl::fromLocalFile(path));
             }
-            videoViews_->setCurrentIndex(1);
+            videoViews_->setCurrentWidget(playbackVideo_);
             player_->play();
         } else {
             if (player_) player_->pause();
@@ -543,7 +560,8 @@ void MainWindow::showSection(int index) {
         sidePanels_->setCurrentIndex(index);
     }
     videoLabel_->clear();
-    videoViews_->setCurrentIndex(index == 1 && playing_ ? 1 : 0);
+    videoViews_->setCurrentIndex(index == 1 && playing_ ? 2 :
+        (index == 0 && previewOn_ && glPreview_->hasFrame() ? 1 : 0));
     playbackControls_->setVisible(index == 1);
     fpsLabel_->setVisible(index == 0);
     diagnosticLabel_->setVisible(index == 0);
@@ -589,7 +607,7 @@ void MainWindow::refreshUi() {
 
     if (currentPage_ == 0) {
         if (!previewOn_) videoLabel_->setText("点击“开启实时画面”显示摄像头");
-        else if (videoLabel_->pixmap().isNull()) videoLabel_->setText("正在等待摄像头画面…");
+        else if (!glPreview_->hasFrame()) videoLabel_->setText("正在等待摄像头画面…");
     } else if (currentPage_ == 1 && !playing_) {
         videoLabel_->setText("选择录像后在这里播放");
     }
@@ -802,6 +820,8 @@ void MainWindow::updateCameraView() {
         if (player_) player_->stop();
         powerOn_ = previewOn_ = streaming_ = recording_ = false;
         videoLabel_->clear();
+        glPreview_->clearFrame();
+        videoViews_->setCurrentWidget(videoLabel_);
         fpsClock_.invalidate();
         fpsLabel_->setText("采集 -- / 预览 -- fps");
         refreshUi();
@@ -830,8 +850,14 @@ void MainWindow::updateCameraView() {
     }
     PreviewImage frame;
     if (pipeline_.takeLatestImage(frame)) {
-        qtPreviewLog_.present(videoLabel_, std::move(frame.image),
-                              frame.sequence, frame.capturePtsUs);
+        const uint32_t sequence = frame.sequence;
+        const int64_t pts = frame.capturePtsUs;
+        QElapsedTimer enqueueTimer;
+        if (qtPreviewLog_.enabled()) enqueueTimer.start();
+        glPreview_->present(std::move(frame));
+        videoViews_->setCurrentWidget(glPreview_);
+        qtPreviewLog_.noteGlSubmitted(sequence, pts,
+            qtPreviewLog_.enabled() ? static_cast<uint64_t>(enqueueTimer.nsecsElapsed()) : 0);
         pipeline_.noteUiSubmitted();
         ++previewFramesInWindow_;
     }

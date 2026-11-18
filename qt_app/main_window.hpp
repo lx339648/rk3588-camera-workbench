@@ -18,6 +18,7 @@ class QStackedWidget;
 class QTimer;
 class QVideoWidget;
 class QWidget;
+class Nv12PreviewWidget;
 
 class MainWindow : public QMainWindow {
 public:
@@ -43,6 +44,7 @@ private:
     QStackedWidget* pages_ = nullptr;      // 媒体区 / 设置页
     QStackedWidget* sidePanels_ = nullptr; // 实时控制 / 文件列表
     QLabel* videoLabel_ = nullptr;         // 共用画面区的占位文字
+    Nv12PreviewWidget* glPreview_ = nullptr;
     QLabel* playbackTime_ = nullptr;
     QLabel* fpsLabel_ = nullptr;           // 采集及预览更新帧率
     QLabel* diagnosticLabel_ = nullptr;    // 每秒汇总的环节耗时
@@ -86,6 +88,7 @@ private:
     QString serverLog_;
     QElapsedTimer serverStartClock_;
     QElapsedTimer fpsClock_;
+    QElapsedTimer glComposeClock_;
     int previewFramesInWindow_ = 0;
     uint64_t lastCaptureCount_ = 0;
 };
