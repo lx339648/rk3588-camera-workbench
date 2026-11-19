@@ -60,7 +60,8 @@ QtPreviewLog::~QtPreviewLog() {
 }
 
 void QtPreviewLog::beginTick(bool live, uint64_t pending_overwrites,
-                              uint64_t ready_overwrites) {
+                              uint64_t ready_overwrites, uint64_t ai_pending_overwrites,
+                              uint64_t ai_ready_overwrites) {
     if (!enabled_) return;
     if (!live) {
         if (ticks_ > 0) flushSummary();
@@ -87,9 +88,15 @@ void QtPreviewLog::beginTick(bool live, uint64_t pending_overwrites,
             pendingOverwrites_ += pending_overwrites - previousPendingOverwrites_;
         if (ready_overwrites >= previousReadyOverwrites_)
             readyOverwrites_ += ready_overwrites - previousReadyOverwrites_;
+        if (ai_pending_overwrites >= previousAiPendingOverwrites_)
+            aiPendingOverwrites_ += ai_pending_overwrites - previousAiPendingOverwrites_;
+        if (ai_ready_overwrites >= previousAiReadyOverwrites_)
+            aiReadyOverwrites_ += ai_ready_overwrites - previousAiReadyOverwrites_;
     }
     previousPendingOverwrites_ = pending_overwrites;
     previousReadyOverwrites_ = ready_overwrites;
+    previousAiPendingOverwrites_ = ai_pending_overwrites;
+    previousAiReadyOverwrites_ = ai_ready_overwrites;
     dropBaselineValid_ = true;
 }
 
@@ -123,6 +130,24 @@ void QtPreviewLog::noteGlCompose(uint64_t compose_ns) {
     if (enabled_) glCompose_.add(compose_ns);
 }
 
+void QtPreviewLog::noteAiFrame(uint64_t queue_wait_ns, uint64_t preprocess_ns,
+                               uint64_t infer_ns, uint64_t total_ns, size_t people,
+                               uint64_t input_ns, uint64_t run_ns, uint64_t output_ns,
+                               uint64_t decode_ns, uint64_t release_ns) {
+    if (!enabled_) return;
+    ++aiFrames_;
+    aiPeople_ += people;
+    aiQueueWait_.add(queue_wait_ns);
+    aiPreprocess_.add(preprocess_ns);
+    aiInfer_.add(infer_ns);
+    aiTotal_.add(total_ns);
+    aiInput_.add(input_ns);
+    aiRun_.add(run_ns);
+    aiOutput_.add(output_ns);
+    aiDecode_.add(decode_ns);
+    aiRelease_.add(release_ns);
+}
+
 void QtPreviewLog::flushSummary() {
     if (ticks_ == 0) return;
     std::ostringstream line;
@@ -135,6 +160,10 @@ void QtPreviewLog::flushSummary() {
          << " seq_resets=" << sequenceResets_
          << " preview_replace_pending=" << pendingOverwrites_
          << " preview_replace_ready=" << readyOverwrites_
+         << " ai_frames=" << aiFrames_
+         << " ai_people=" << aiPeople_
+         << " ai_replace_pending=" << aiPendingOverwrites_
+         << " ai_replace_ready=" << aiReadyOverwrites_
          << " last_seq=" << lastSequence_
          << " last_pts_us=" << lastPtsUs_;
     auto append = [&line](const char* name, const Stage& stage) {
@@ -148,6 +177,15 @@ void QtPreviewLog::flushSummary() {
     append("gl_enqueue", glEnqueue_);
     append("gl_paint_cpu", glPaint_);
     append("gl_compose_swap", glCompose_);
+    append("ai_queue_wait", aiQueueWait_);
+    append("ai_preprocess", aiPreprocess_);
+    append("ai_infer_post", aiInfer_);
+    append("rknn_inputs_set", aiInput_);
+    append("rknn_run", aiRun_);
+    append("rknn_outputs_get", aiOutput_);
+    append("yolo_decode_nms", aiDecode_);
+    append("rknn_outputs_release", aiRelease_);
+    append("ai_total", aiTotal_);
     enqueue(line.str());
     ticks_ = 0;
     frames_ = 0;
@@ -155,11 +193,24 @@ void QtPreviewLog::flushSummary() {
     sequenceResets_ = 0;
     pendingOverwrites_ = 0;
     readyOverwrites_ = 0;
+    aiPendingOverwrites_ = 0;
+    aiReadyOverwrites_ = 0;
+    aiFrames_ = 0;
+    aiPeople_ = 0;
     tickInterval_ = {};
     callbackTime_ = {};
     glEnqueue_ = {};
     glPaint_ = {};
     glCompose_ = {};
+    aiPreprocess_ = {};
+    aiQueueWait_ = {};
+    aiInfer_ = {};
+    aiTotal_ = {};
+    aiInput_ = {};
+    aiRun_ = {};
+    aiOutput_ = {};
+    aiDecode_ = {};
+    aiRelease_ = {};
     summaryClock_.restart();
 }
 

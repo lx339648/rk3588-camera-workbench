@@ -5,6 +5,7 @@
 #include "mpp_h264_encoder.hpp"
 #include "mkv_recorder.hpp"
 #include "rtsp_publisher.hpp"
+#include "ai/yolo_rknn.hpp"
 
 #include <utility>
 #include <vector>
@@ -12,6 +13,61 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <chrono>
+#include <algorithm>
+#include <memory>
+#include <stdexcept>
+#include <im2d.hpp>
+#include <rga.h>
+
+namespace {
+using Clock = std::chrono::steady_clock;
+uint64_t elapsedNs(Clock::time_point start, Clock::time_point end) {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count());
+}
+
+// AI 支路直接从相机 YUYV 再做一次 RGA 转换；不读取主链路的 NV12。
+// 当前相机固定 640x480，模型固定 640x640：RGA 输出 RGB888 后居中补黑边。
+bool yuyvToRknnRgb(const std::vector<uint8_t>& yuyv, uint32_t bytesPerLine,
+                   std::vector<uint8_t>& rgb, std::vector<uint8_t>& modelInput,
+                   std::string& error) {
+    constexpr int width = 640, height = 480, side = vision::YoloRknn::side;
+    if (bytesPerLine < width * 2 || bytesPerLine % 2 ||
+        yuyv.size() < static_cast<size_t>(bytesPerLine) * height) {
+        error = "AI YUYV 输入长度或行跨度不正确";
+        return false;
+    }
+    rgb.resize(width * height * 3);
+    modelInput.assign(vision::YoloRknn::inputBytes, 0);
+    auto srcHandle = importbuffer_virtualaddr(const_cast<uint8_t*>(yuyv.data()),
+                                              static_cast<int>(yuyv.size()));
+    auto dstHandle = importbuffer_virtualaddr(rgb.data(), static_cast<int>(rgb.size()));
+    if (!srcHandle || !dstHandle) {
+        error = std::string("AI RGA 导入失败：") + imStrError();
+        if (srcHandle) releasebuffer_handle(srcHandle);
+        if (dstHandle) releasebuffer_handle(dstHandle);
+        return false;
+    }
+    rga_buffer_t src = wrapbuffer_handle(srcHandle, width, height, RK_FORMAT_YUYV_422,
+                                         static_cast<int>(bytesPerLine / 2), height);
+    rga_buffer_t dst = wrapbuffer_handle(dstHandle, width, height, RK_FORMAT_RGB_888,
+                                         width, height);
+    IM_STATUS status = imcheck(src, dst, {}, {});
+    if (status == IM_STATUS_NOERROR)
+        status = imcvtcolor(src, dst, RK_FORMAT_YUYV_422, RK_FORMAT_RGB_888);
+    if (status != IM_STATUS_SUCCESS)
+        error = std::string("AI RGA RGB 转换失败：") + imStrError(status);
+    releasebuffer_handle(srcHandle);
+    releasebuffer_handle(dstHandle);
+    if (status != IM_STATUS_SUCCESS) return false;
+    constexpr size_t rowBytes = width * 3;
+    constexpr size_t padTop = (side - height) / 2;
+    for (int row = 0; row < height; ++row)
+        std::memcpy(modelInput.data() + (padTop + row) * rowBytes,
+                    rgb.data() + static_cast<size_t>(row) * rowBytes, rowBytes);
+    return true;
+}
+}
 
 CameraPipeline::~CameraPipeline() { stop(); }
 
@@ -40,6 +96,7 @@ void CameraPipeline::start() {
         std::lock_guard<std::mutex> lock(mutex_);
         lastError_.clear();
         lastRecordError_.clear();
+        lastAiError_.clear();
         latestImage_ = {};
         latestLog_ = {};
         takenImageLog_ = {};
@@ -49,10 +106,16 @@ void CameraPipeline::start() {
     }
     requested_ = true;
     finished_ = false;
+    captureFailed_ = false;
     capturedFrames_ = 0;
     pendingPreviewOverwrites_ = 0;
     readyImageOverwrites_ = 0;
+    aiPendingOverwrites_ = 0;
+    aiReadyOverwrites_ = 0;
+    aiEnabled_ = false;
+    ++aiGeneration_;
     previewThread_ = std::thread(&CameraPipeline::runPreview, this);
+    aiThread_ = std::thread(&CameraPipeline::runAi, this);
     thread_ = std::thread(&CameraPipeline::run, this);
 }
 
@@ -61,9 +124,12 @@ void CameraPipeline::stop() {
     wantStream_ = false;
     wantRecord_ = false;
     preview_ = false;
+    aiEnabled_ = false;
     previewReady_.notify_one();
+    aiReady_.notify_one();
     if (thread_.joinable()) thread_.join();
     if (previewThread_.joinable()) previewThread_.join();
+    if (aiThread_.joinable()) aiThread_.join();
     logWriter_.stop();
     logEnabled_ = false;
     detailLogEnabled_ = false;
@@ -76,17 +142,42 @@ void CameraPipeline::stop() {
     latestLog_ = {};
     takenImageLog_ = {};
     pendingPreview_ = RawPreview{};
+    pendingAi_ = AiJob{};
+    recycledYuyv_.clear();
 }
 
 void CameraPipeline::setPreviewEnabled(bool enabled) {
     preview_ = enabled;
     if (!enabled) {
+        setAiEnabled(false);
         std::lock_guard<std::mutex> lock(mutex_);
         latestImage_ = {};
         latestLog_ = {};
         takenImageLog_ = {};
         pendingPreview_ = RawPreview{};
     }
+}
+
+void CameraPipeline::setAiEnabled(bool enabled) {
+    aiEnabled_ = enabled;
+    ++aiGeneration_;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pendingAi_ = {};
+        latestImage_ = {};
+        latestLog_ = {};
+        takenImageLog_ = {};
+        if (enabled) lastAiError_.clear();
+    }
+    aiReady_.notify_one();
+}
+
+bool CameraPipeline::takeAiError(std::string& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (lastAiError_.empty()) return false;
+    error = std::move(lastAiError_);
+    lastAiError_.clear();
+    return true;
 }
 
 void CameraPipeline::setStreamingEnabled(bool enabled, std::string url) {
@@ -169,6 +260,8 @@ void CameraPipeline::reportRecordError(std::string message) {
 
 void CameraPipeline::run() {
     CaptureConfig config;
+    if (const char* device = std::getenv("CAMERA_DEVICE"); device && *device)
+        config.device = device;
     config.enable_frame_log = logEnabled_;
     V4L2Capture camera;
     RgaYuyvConverter converter;
@@ -183,6 +276,7 @@ void CameraPipeline::run() {
             " " + log.detailLine());
     };
     if (!camera.initialize(config, error)) {
+        captureFailed_ = true;
         reportError("启动摄像头失败：" + error);
         requested_ = false;
         finished_ = true;
@@ -206,7 +300,12 @@ void CameraPipeline::run() {
     std::vector<uint8_t> header;
 
     while (requested_) {
+        if (captured.data.empty()) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!recycledYuyv_.empty()) captured.data.swap(recycledYuyv_);
+        }
         if (!camera.captureFrame(captured, error)) {
+            captureFailed_ = true;
             logFailure("capture", error, captured.log);
             if (requested_) reportError("采集失败：" + error);
             break;
@@ -218,7 +317,9 @@ void CameraPipeline::run() {
             break;
         }
 
-        // 主线只复制 NV12；缩放和转 RGB 交给预览线程，避免编码等待转换。
+        RawPreview aiPreview;
+        bool submitAi = false;
+        // 显示仍需 NV12 副本；AI 输入使用原始 YUYV，不从该副本再转 RGB。
         if (preview_) {
             MppBuffer buffer = mpp_frame_get_buffer(decoded.nativeFrame());
             auto* pixels = buffer ? static_cast<const uint8_t*>(mpp_buffer_get_ptr(buffer)) : nullptr;
@@ -248,12 +349,28 @@ void CameraPipeline::run() {
             mpp_buffer_sync_begin(buffer);
             std::memcpy(copy.nv12.data(), pixels, bytes);
             mpp_buffer_sync_end(buffer);
-            if (preview_) {
+            submitAi = aiEnabled_;
+            if (submitAi) aiPreview = std::move(copy);
+            else if (preview_) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!pendingPreview_.nv12.empty()) ++pendingPreviewOverwrites_;
                 pendingPreview_ = std::move(copy); // 仅保留最新待转换帧。
             }
-            previewReady_.notify_one();
+            if (!submitAi) previewReady_.notify_one();
+        }
+        if (submitAi && aiEnabled_ && preview_) {
+            AiJob job;
+            job.yuyv = std::move(captured.data); // RGA 主转换完成后立即交给 AI。
+            job.bytesPerLine = captured.bytes_per_line;
+            job.generation = aiGeneration_.load();
+            job.queuedAt = Clock::now();
+            job.preview = std::move(aiPreview);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!pendingAi_.yuyv.empty()) ++aiPendingOverwrites_;
+                pendingAi_ = std::move(job);
+            }
+            aiReady_.notify_one();
         }
 
         if ((wantStream_ || wantRecord_) && !encoderReady) {
@@ -402,6 +519,7 @@ void CameraPipeline::run() {
     alive_ = false;
     requested_ = false;
     previewReady_.notify_one();
+    aiReady_.notify_one();
     finished_ = true;
 }
 
@@ -420,13 +538,116 @@ void CameraPipeline::runPreview() {
         frame.log.mark(FramePoint::PreviewStart);
         frame.log.mark(FramePoint::PreviewReady);
         if (frame.log.enabled) logStats_.addPreview(frame.log);
-        if (preview_) {
+        if (preview_ && !aiEnabled_) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!latestImage_.nv12.empty()) ++readyImageOverwrites_;
             latestImage_ = {std::move(frame.nv12), frame.width, frame.height,
                             frame.horizontalStride, frame.verticalStride,
                             frame.capturePtsUs, frame.sequence, frame.timestampFlags};
             latestLog_ = std::move(frame.log);
+        }
+    }
+}
+
+void CameraPipeline::runAi() {
+    std::unique_ptr<vision::YoloRknn> model;
+    std::vector<uint8_t> rgb;
+    std::vector<uint8_t> input;
+    while (requested_) {
+        AiJob job;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            aiReady_.wait(lock, [this] { return !requested_ || !pendingAi_.yuyv.empty(); });
+            if (!requested_) break;
+            job = std::move(pendingAi_);
+            pendingAi_ = {};
+        }
+        auto recycleInput = [this, &job] {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (recycledYuyv_.empty()) recycledYuyv_ = std::move(job.yuyv);
+        };
+        if (!aiEnabled_ || job.generation != aiGeneration_.load()) {
+            recycleInput();
+            continue;
+        }
+        try {
+            if (!model) {
+                const char* path = std::getenv("CAMERA_RKNN_MODEL");
+                std::string modelPath;
+                if (path && *path) modelPath = path;
+                else if (const char* home = std::getenv("HOME"))
+                    modelPath = (std::filesystem::path(home) / "lx_ws/model_train/yolov8.rknn").string();
+                else throw std::runtime_error("请设置 CAMERA_RKNN_MODEL 指向 yolov8.rknn");
+                model = std::make_unique<vision::YoloRknn>(modelPath);
+            }
+            const auto start = Clock::now();
+            job.preview.log.mark(FramePoint::PreviewStart);
+            std::string error;
+            if (!yuyvToRknnRgb(job.yuyv, job.bytesPerLine, rgb, input, error))
+                throw std::runtime_error(error);
+            const auto converted = Clock::now();
+            std::vector<vision::Detection> detections;
+            vision::InferTiming inferTiming;
+            model->infer(input.data(), input.size(), &detections, &inferTiming);
+            const auto inferred = Clock::now();
+            PreviewImage ready;
+            ready.nv12 = std::move(job.preview.nv12);
+            ready.width = job.preview.width;
+            ready.height = job.preview.height;
+            ready.horizontalStride = job.preview.horizontalStride;
+            ready.verticalStride = job.preview.verticalStride;
+            ready.capturePtsUs = job.preview.capturePtsUs;
+            ready.sequence = job.preview.sequence;
+            ready.timestampFlags = job.preview.timestampFlags;
+            ready.aiDetected = true;
+            ready.aiQueueWaitNs = elapsedNs(job.queuedAt, start);
+            ready.aiPreprocessNs = elapsedNs(start, converted);
+            ready.aiInferNs = elapsedNs(converted, inferred);
+            ready.aiInputNs = inferTiming.inputNs;
+            ready.aiRunNs = inferTiming.runNs;
+            ready.aiOutputNs = inferTiming.outputNs;
+            ready.aiDecodeNs = inferTiming.decodeNs;
+            ready.aiReleaseNs = inferTiming.releaseNs;
+            ready.aiTotalNs = elapsedNs(start, inferred);
+            // 640x480 输入在 640x640 模型中上下各补 80 像素。
+            for (const auto& detection : detections) {
+                if (detection.label != 0) continue;
+                PersonBox box{detection.score,
+                    std::clamp(detection.x1, 0.f, 640.f),
+                    std::clamp(detection.y1 - 80.f, 0.f, 480.f),
+                    std::clamp(detection.x2, 0.f, 640.f),
+                    std::clamp(detection.y2 - 80.f, 0.f, 480.f)};
+                if (box.x2 > box.x1 && box.y2 > box.y1) ready.people.push_back(box);
+            }
+            job.preview.log.mark(FramePoint::PreviewReady);
+            if (job.preview.log.enabled) logStats_.addPreview(job.preview.log);
+            if (logEnabled_ && detailLogEnabled_)
+                logWriter_.push("branch=ai seq=" + std::to_string(ready.sequence) +
+                    " preprocess_ms=" + std::to_string(ready.aiPreprocessNs / 1e6) +
+                    " infer_ms=" + std::to_string(ready.aiInferNs / 1e6) +
+                    " input_ms=" + std::to_string(ready.aiInputNs / 1e6) +
+                    " run_ms=" + std::to_string(ready.aiRunNs / 1e6) +
+                    " output_ms=" + std::to_string(ready.aiOutputNs / 1e6) +
+                    " decode_ms=" + std::to_string(ready.aiDecodeNs / 1e6) +
+                    " release_ms=" + std::to_string(ready.aiReleaseNs / 1e6) +
+                    " people=" + std::to_string(ready.people.size()));
+            if (aiEnabled_ && preview_ && job.generation == aiGeneration_.load()) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!latestImage_.nv12.empty()) ++aiReadyOverwrites_;
+                latestImage_ = std::move(ready);
+                latestLog_ = std::move(job.preview.log);
+            }
+            recycleInput();
+        } catch (const std::exception& exception) {
+            if (job.generation == aiGeneration_.load()) {
+                aiEnabled_ = false;
+                ++aiGeneration_;
+                std::lock_guard<std::mutex> lock(mutex_);
+                lastAiError_ = std::string("人员检测已关闭：") + exception.what();
+                pendingAi_ = {};
+            }
+            model.reset();
+            recycleInput();
         }
     }
 }

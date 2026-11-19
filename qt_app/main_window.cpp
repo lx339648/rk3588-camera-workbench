@@ -108,10 +108,20 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     viewTimer_->setInterval(16); // 仅检查最新画面，不控制摄像头采集节奏。
     connect(viewTimer_, &QTimer::timeout, this, [this] { updateCameraView(); });
     viewTimer_->start();
+    reconnectTimer_ = new QTimer(this);
+    reconnectTimer_->setInterval(2000);
+    connect(reconnectTimer_, &QTimer::timeout, this, [this] {
+        if (!powerOn_ || !reconnecting_ || reconnectAttemptActive_) return;
+        pipeline_.start();
+        pipeline_.setPreviewEnabled(previewOn_);
+        pipeline_.setAiEnabled(previewOn_ && aiOn_);
+        reconnectAttemptActive_ = true;
+    });
 }
 
 MainWindow::~MainWindow() {
     viewTimer_->stop();
+    reconnectTimer_->stop();
     serverReadyTimer_->stop();
     if (player_) player_->stop();
     pipeline_.stop(); // MkvRecorder::close() 在工作线程退出前写完 MKV 索引。
@@ -169,6 +179,9 @@ QWidget* MainWindow::createSidebar() {
                     ? "Qt 预览日志：" + qtPreviewLog_.path()
                     : "Qt 预览日志未启用或无法创建（CAMERA_QT_PREVIEW_LOG=0 可关闭）"));
         } else {
+            reconnectTimer_->stop();
+            reconnecting_ = false;
+            reconnectAttemptActive_ = false;
             serverReadyTimer_->stop();
             if (player_) player_->stop();
             pipeline_.stop(); // 等工作线程退出，再清除按钮状态。
@@ -177,6 +190,7 @@ QWidget* MainWindow::createSidebar() {
             recording_ = false;
             streaming_ = false;
             previewOn_ = false;
+            aiOn_ = false;
             playing_ = false;
             videoLabel_->clear();
             glPreview_->clearFrame();
@@ -302,6 +316,7 @@ QWidget* MainWindow::createLivePanel() {
         else fpsClock_.invalidate();
         fpsLabel_->setText("采集 -- / 预览 -- fps");
         if (!on) {
+            aiOn_ = false;
             if (recording_) {
                 pipeline_.setRecordingEnabled(false, recordingPath_.toStdString());
                 recording_ = false;
@@ -313,6 +328,20 @@ QWidget* MainWindow::createLivePanel() {
         refreshUi();
     });
     layout->addWidget(previewButton_);
+
+    aiButton_ = new QPushButton("开启人员检测", panel);
+    aiButton_->setObjectName("secondaryButton");
+    aiButton_->setCheckable(true);
+    connect(aiButton_, &QPushButton::clicked, this, [this](bool on) {
+        if (!powerOn_ || !previewOn_) { refreshUi(); return; }
+        aiOn_ = on;
+        pipeline_.setAiEnabled(on);
+        glPreview_->clearFrame();
+        videoViews_->setCurrentWidget(videoLabel_);
+        videoLabel_->setText(on ? "正在等待人员检测画面…" : "正在等待摄像头画面…");
+        refreshUi();
+    });
+    layout->addWidget(aiButton_);
 
     layout->addSpacing(22);
     auto* recordLabel = new QLabel("录像", panel);
@@ -570,18 +599,23 @@ void MainWindow::showSection(int index) {
 }
 
 void MainWindow::refreshUi() {
+    const bool cameraReady = powerOn_ && !reconnecting_;
     powerButton_->setChecked(powerOn_);
-    powerButton_->setText(powerOn_ ? "关闭系统" : "启动系统");
-    powerStatus_->setText(powerOn_ ? "摄像头启动中 / 运行中" : "摄像头未启动");
+    powerButton_->setText(reconnecting_ ? "停止重连" : powerOn_ ? "关闭系统" : "启动系统");
+    powerStatus_->setText(reconnecting_ ? "等待摄像头重新连接" :
+                          powerOn_ ? "摄像头启动中 / 运行中" : "摄像头未启动");
 
-    previewButton_->setEnabled(powerOn_);
+    previewButton_->setEnabled(cameraReady);
     previewButton_->setChecked(previewOn_);
     previewButton_->setText(previewOn_ ? "关闭实时画面" : "开启实时画面");
+    aiButton_->setEnabled(cameraReady && previewOn_);
+    aiButton_->setChecked(aiOn_);
+    aiButton_->setText(aiOn_ ? "关闭人员检测" : "开启人员检测");
 
     const QFileInfo directory(directoryEdit_->text().trimmed());
     const bool validDirectory = !directoryEdit_->text().trimmed().isEmpty() &&
                                 directory.isDir() && directory.isWritable();
-    recordButton_->setEnabled(powerOn_ && previewOn_ &&
+    recordButton_->setEnabled(cameraReady && previewOn_ &&
         (recording_ || (recordingPath_.isEmpty() && !pipeline_.recording() &&
                         validDirectory)));
     recordButton_->setChecked(recording_);
@@ -590,7 +624,7 @@ void MainWindow::refreshUi() {
     recordButton_->setToolTip(validDirectory
         ? "" : "请先在设置中选择可写的录像文件夹");
 
-    streamButton_->setEnabled(powerOn_ && (streaming_ || !pipeline_.streaming()));
+    streamButton_->setEnabled(cameraReady && (streaming_ || !pipeline_.streaming()));
     streamButton_->setChecked(streaming_);
     streamButton_->setText(streaming_ ? "关闭 RTSP 推流" : "开启 RTSP 推流");
     rtspEdit_->setEnabled(!streaming_);
@@ -782,8 +816,9 @@ void MainWindow::stopOwnedServer() {
 
 void MainWindow::updateCameraView() {
     const PreviewDropStats drops = pipeline_.previewDropStats();
-    qtPreviewLog_.beginTick(powerOn_ && previewOn_ && currentPage_ == 0,
-                            drops.pendingOverwrites, drops.readyOverwrites);
+    qtPreviewLog_.beginTick(powerOn_ && !reconnecting_ && previewOn_ && currentPage_ == 0,
+                            drops.pendingOverwrites, drops.readyOverwrites,
+                            drops.aiPendingOverwrites, drops.aiReadyOverwrites);
     std::string error;
     PipelineDiagnostics diagnostic;
     if (pipeline_.takeDiagnostics(diagnostic)) {
@@ -813,12 +848,42 @@ void MainWindow::updateCameraView() {
         recording_ = false;
         refreshUi();
     }
-    if (powerOn_ && pipeline_.finished()) {
+    if (pipeline_.takeAiError(error)) {
+        aiOn_ = false;
+        pageHint_->setText(QString::fromStdString(error));
+        refreshUi();
+    }
+    if (reconnecting_ && reconnectAttemptActive_ && pipeline_.alive()) {
+        reconnectTimer_->stop();
+        reconnecting_ = false;
+        reconnectAttemptActive_ = false;
+        previewFramesInWindow_ = 0;
+        lastCaptureCount_ = pipeline_.capturedFrames();
+        if (previewOn_ && currentPage_ == 0) fpsClock_.start();
+        pageHint_->setText("摄像头已恢复采集");
+        if (streaming_) beginStream();
+        refreshUi();
+    }
+    if (powerOn_ && pipeline_.finished() && (!reconnecting_ || reconnectAttemptActive_)) {
+        const bool retryCapture = pipeline_.captureFailed();
         pipeline_.stop();
         stopOwnedServer();
         serverReadyTimer_->stop();
         if (player_) player_->stop();
-        powerOn_ = previewOn_ = streaming_ = recording_ = false;
+        if (retryCapture) {
+            const bool wasRecording = recording_;
+            reconnecting_ = true;
+            reconnectAttemptActive_ = false;
+            recording_ = false; // 断线时封闭当前 MKV，避免重连后覆盖已有录像。
+            reconnectTimer_->start();
+            pageHint_->setText(wasRecording
+                ? "摄像头已断开，正在每 2 秒尝试重连；当前录像已结束"
+                : "摄像头已断开，正在每 2 秒尝试重连");
+        } else {
+            reconnectTimer_->stop();
+            reconnecting_ = reconnectAttemptActive_ = false;
+            powerOn_ = previewOn_ = aiOn_ = streaming_ = recording_ = false;
+        }
         videoLabel_->clear();
         glPreview_->clearFrame();
         videoViews_->setCurrentWidget(videoLabel_);
@@ -830,21 +895,22 @@ void MainWindow::updateCameraView() {
         const QString finishedFile = recordingPath_;
         recordingPath_.clear();
         refreshFileList();
-        if (!recordFailed_ && QFileInfo::exists(finishedFile))
+        if (!reconnecting_ && !recordFailed_ && QFileInfo::exists(finishedFile))
             pageHint_->setText("录像已保存：" + QFileInfo(finishedFile).fileName());
     }
-    powerStatus_->setText(!powerOn_ ? "摄像头未启动" :
+    powerStatus_->setText(reconnecting_ ? "等待摄像头重新连接" :
+                          !powerOn_ ? "摄像头未启动" :
                           pipeline_.alive() ? "摄像头运行中" : "摄像头启动中");
-    if (streaming_) streamButton_->setText(
+    if (streaming_) streamButton_->setText(reconnecting_ ? "等待相机恢复后推流" :
         pipeline_.streaming() ? "关闭 RTSP 推流" : "正在连接 RTSP…");
-    else streamButton_->setEnabled(powerOn_ && !pipeline_.streaming());
+    else streamButton_->setEnabled(powerOn_ && !reconnecting_ && !pipeline_.streaming());
     if (!streaming_ && !pipeline_.streaming() &&
         !serverReadyTimer_->isActive() &&
         mediaMtx_->state() != QProcess::NotRunning) stopOwnedServer();
     if (recording_) recordButton_->setText(
         pipeline_.recording() ? "停止录制" : "等待关键帧，准备录制…");
 
-    if (!powerOn_ || !previewOn_ || currentPage_ != 0) {
+    if (!powerOn_ || reconnecting_ || !previewOn_ || currentPage_ != 0) {
         qtPreviewLog_.endTick();
         return;
     }
@@ -852,6 +918,11 @@ void MainWindow::updateCameraView() {
     if (pipeline_.takeLatestImage(frame)) {
         const uint32_t sequence = frame.sequence;
         const int64_t pts = frame.capturePtsUs;
+        if (frame.aiDetected)
+            qtPreviewLog_.noteAiFrame(frame.aiQueueWaitNs, frame.aiPreprocessNs, frame.aiInferNs,
+                                      frame.aiTotalNs, frame.people.size(),
+                                      frame.aiInputNs, frame.aiRunNs, frame.aiOutputNs,
+                                      frame.aiDecodeNs, frame.aiReleaseNs);
         QElapsedTimer enqueueTimer;
         if (qtPreviewLog_.enabled()) enqueueTimer.start();
         glPreview_->present(std::move(frame));

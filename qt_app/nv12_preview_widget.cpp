@@ -3,6 +3,8 @@
 #include <QOpenGLContext>
 #include <QElapsedTimer>
 #include <QDebug>
+#include <QPainter>
+#include <QPen>
 
 #include <algorithm>
 #include <cstring>
@@ -145,5 +147,23 @@ void Nv12PreviewWidget::paintGL() {
         program_.disableAttributeArray(texCoord);
     }
     program_.release();
+    if (frame_.aiDetected && !frame_.people.empty()) {
+        const qreal drawWidth = width() * x;
+        const qreal drawHeight = height() * h;
+        const qreal offsetX = (width() - drawWidth) / 2.0;
+        const qreal offsetY = (height() - drawHeight) / 2.0;
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(QPen(QColor(35, 240, 112), 2));
+        for (const auto& box : frame_.people) {
+            const QRectF bounds(offsetX + box.x1 * drawWidth / frame_.width,
+                                offsetY + box.y1 * drawHeight / frame_.height,
+                                (box.x2 - box.x1) * drawWidth / frame_.width,
+                                (box.y2 - box.y1) * drawHeight / frame_.height);
+            painter.drawRect(bounds);
+            painter.drawText(bounds.topLeft() + QPointF(2, 15),
+                             QString("person %1").arg(box.score, 0, 'f', 2));
+        }
+    }
     if (paintObserver_) paintObserver_(static_cast<uint64_t>(timer.nsecsElapsed()));
 }

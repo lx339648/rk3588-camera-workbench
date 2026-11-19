@@ -4,7 +4,7 @@
 `capture_v4l2`、RGA 格式转换、MPP 编码和 `rtsp_publisher`，不另开摄像头。
 
 ```bash
-cd ~/lx_ws/C405_Log_camera
+cd ~/lx_ws/C405_Log_log
 cmake -S qt_app -B qt_app/build
 cmake --build qt_app/build -j2
 ./qt_app/build/qt_window
@@ -23,8 +23,20 @@ QT_QPA_PLATFORM=xcb QT_XCB_GL_INTEGRATION=xcb_egl \
 Mesa llvmpipe 软件渲染；仅看到 OpenGL 窗口不代表使用了 GPU。
 `DISPLAY=:0` 指向板卡本地桌面，x11vnc 可以共享同一桌面供远端查看。
 
+USB 摄像头断开后，程序每 2 秒重试采集；重新插入后恢复此前的预览、人员检测和
+RTSP 推流。断线时当前 MKV 会封闭，录像需重新点击开始。默认打开 `/dev/video84`；
+若重插后设备编号变化，启动前可设置 `CAMERA_DEVICE` 为相机的稳定
+`/dev/v4l/by-id/...-video-index...` 路径（先用 `ls -l /dev/v4l/by-id/` 确认
+它指向 D405C 的彩色采集节点），再运行程序。
+
 需要 Qt6 Widgets、OpenGL/OpenGLWidgets、Qt6 Multimedia/MultimediaWidgets、FFmpeg 开发包
 （libavformat、libavcodec、libavutil）、MPP 和带 IM2D 接口的 librga 头文件及库。
+新增 AI 检测还需要 RKNN 运行库 `librknnrt.so`。默认模型路径为
+`~/lx_ws/model_train/yolov8.rknn`，也可设置 `CAMERA_RKNN_MODEL` 指向模型文件。
+若运行库不在 `~/lx_ws/model_train` 或系统库目录，在 CMake 配置时指定
+`-DRKNN_LIBRARY=/绝对路径/librknnrt.so`。
+RKNN SDK 的 `rknn_api.h` 由本机 SDK 提供，不包含在仓库中；若不在系统头文件目录，
+配置时指定 `-DRKNN_INCLUDE_DIR=/绝对路径/SDK/include`。
 MPP 若未安装在常见位置，可以在
 `cmake` 配置命令后加 `-DMPP_INCLUDE_DIR=... -DMPP_LIBRARY=...`。
 
@@ -37,6 +49,12 @@ MPP 若未安装在常见位置，可以在
   两处槽位都直接替换旧画面，不积压；该定时器不控制摄像头帧率。
   画面上方每秒更新一次“采集 / 预览”帧率；预览数值统计的是 Qt 收到并
   提交显示的新帧数，不等同于屏幕物理刷新率或端到端延迟。
+- **开启人员检测**：仅在实时画面开启后可用。AI 线程接收最新 YUYV 帧，
+  另用 RGA 转 RGB888 并补边至 640×640，交给 RKNN YOLOv8n 推理；后处理只保留
+  person 类别。检测结果按相机序号与该帧 NV12 画面一起提交 OpenGL，图像等待
+  自己的检测框；AI 慢时覆盖待处理旧帧，不阻塞采集、编码、录像或 RTSP。
+  本版 AI 输入仍使用 `rknn_inputs_set`，预处理后有一次 RGB 补边拷贝，
+  尚未使用 RKNN 零拷贝接口。模型载入或推理出错时自动关闭 AI，普通预览恢复。
 - **开启 RTSP 推流**：同一个工作线程使用已有 MPP H.264 编码器和 FFmpeg
   发布器。地址指向本机时，先检查端口；若没有服务，就自动启动设置页
   指定的 `mediamtx` 程序。已存在的服务不会重复启动，也不会被程序关闭。
@@ -63,6 +81,13 @@ Qt 预览另有独立日志 `qt_preview_*.log`，设置页会显示路径。它�
 （回调次数、提交新画面次数、没有新画面的次数）。`seq_skipped` 是相邻已显示
 采集序号之间跳过的帧数；`preview_replace_pending` 是待交接 NV12 槽被覆盖
 的次数，`preview_replace_ready` 是待界面取走的 NV12 槽被覆盖的次数。
+AI 开启时另有 `ai_frames`、`ai_people`、`ai_replace_pending`、
+`ai_replace_ready`、`ai_queue_wait`、`ai_preprocess`、`ai_infer_post` 和 `ai_total`；
+这些耗时基于已提交给 Qt 的检测帧，其中 `ai_infer_post` 包含 RKNN 输入输出
+传递及 YOLO 后处理，不能直接当作纯 NPU 执行时间。
+现另分出 `rknn_inputs_set`、`rknn_run`、`rknn_outputs_get`、
+`yolo_decode_nms`、`rknn_outputs_release` 的墙钟耗时；
+`rknn_run` 的调用耗时不一定等于 NPU 硬件计算时间，等待也可能落在输出获取阶段。
 这些数值只在实时预览页开启时按秒汇总，不在每帧写盘；切走页面会结束当前
 统计窗口。每个耗时项的 `n` 是该窗口内的样本数，首个回调没有间隔样本。
 定时器约每秒检查 60 次而相机每秒只出约 30 帧，所以 `empty_ticks` 不为零

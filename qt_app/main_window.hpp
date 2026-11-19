@@ -60,6 +60,7 @@ private:
     QLabel* powerStatus_ = nullptr;
     QPushButton* powerButton_ = nullptr;
     QPushButton* previewButton_ = nullptr;
+    QPushButton* aiButton_ = nullptr;
     QPushButton* recordButton_ = nullptr;
     QPushButton* streamButton_ = nullptr;
     QPushButton* openFileButton_ = nullptr;
@@ -70,6 +71,7 @@ private:
     QLineEdit* serverPathEdit_ = nullptr;
     QListWidget* fileList_ = nullptr;
     QTimer* viewTimer_ = nullptr;
+    QTimer* reconnectTimer_ = nullptr;
     QTimer* serverReadyTimer_ = nullptr;
     QProcess* mediaMtx_ = nullptr;
     CameraPipeline pipeline_;
@@ -77,7 +79,10 @@ private:
 
     int currentPage_ = 0;
     bool powerOn_ = false;
+    bool reconnecting_ = false;
+    bool reconnectAttemptActive_ = false;
     bool previewOn_ = false;
+    bool aiOn_ = false;
     bool recording_ = false;
     bool streaming_ = false;
     bool playing_ = false;

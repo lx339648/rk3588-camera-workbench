@@ -8,6 +8,7 @@
 *.a
 *.so
 *.so.*
+qt_app/ai/rknn_api.h
 
 # Locally recorded or generated media and diagnostics
 *.h264

@@ -4,6 +4,7 @@
 #include <QString>
 
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <fstream>
@@ -24,9 +25,14 @@ public:
     void noteGlSubmitted(uint32_t sequence, int64_t capture_pts_us, uint64_t enqueue_ns);
     void noteGlPaint(uint64_t paint_ns);
     void noteGlCompose(uint64_t compose_ns);
+    void noteAiFrame(uint64_t queue_wait_ns, uint64_t preprocess_ns,
+                     uint64_t infer_ns, uint64_t total_ns, size_t people,
+                     uint64_t input_ns, uint64_t run_ns, uint64_t output_ns,
+                     uint64_t decode_ns, uint64_t release_ns);
     // 一次 Qt 定时器回调的入口/出口；覆盖数由预览分支累计后传入。
     void beginTick(bool live, uint64_t pending_overwrites,
-                   uint64_t ready_overwrites);
+                   uint64_t ready_overwrites, uint64_t ai_pending_overwrites,
+                   uint64_t ai_ready_overwrites);
     void endTick();
     bool enabled() const { return enabled_; }
     const QString& path() const { return path_; }
@@ -53,8 +59,14 @@ private:
     bool lastSequenceValid_ = false;
     uint64_t previousPendingOverwrites_ = 0;
     uint64_t previousReadyOverwrites_ = 0;
+    uint64_t previousAiPendingOverwrites_ = 0;
+    uint64_t previousAiReadyOverwrites_ = 0;
     uint64_t pendingOverwrites_ = 0;
     uint64_t readyOverwrites_ = 0;
+    uint64_t aiPendingOverwrites_ = 0;
+    uint64_t aiReadyOverwrites_ = 0;
+    uint64_t aiFrames_ = 0;
+    uint64_t aiPeople_ = 0;
     uint64_t skippedSequences_ = 0;
     uint64_t sequenceResets_ = 0;
     uint64_t ticks_ = 0;
@@ -64,6 +76,15 @@ private:
     Stage glEnqueue_;
     Stage glPaint_;
     Stage glCompose_;
+    Stage aiPreprocess_;
+    Stage aiQueueWait_;
+    Stage aiInfer_;
+    Stage aiTotal_;
+    Stage aiInput_;
+    Stage aiRun_;
+    Stage aiOutput_;
+    Stage aiDecode_;
+    Stage aiRelease_;
     Stage tickInterval_;
     Stage callbackTime_;
 

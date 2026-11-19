@@ -24,12 +24,26 @@ find_library(RGA_LIBRARY NAMES rga
 if(NOT RGA_INCLUDE_DIR OR NOT RGA_LIBRARY)
     message(FATAL_ERROR "找不到 librga；请设置 -DRGA_ROOT=...，或分别指定 -DRGA_INCLUDE_DIR=... -DRGA_LIBRARY=...")
 endif()
+find_library(RKNN_LIBRARY NAMES rknnrt
+    HINTS ${CMAKE_CURRENT_SOURCE_DIR}/../../model_train
+          ${CMAKE_CURRENT_SOURCE_DIR}/../.. /usr/lib/aarch64-linux-gnu /usr/local/lib)
+if(NOT RKNN_LIBRARY)
+    message(FATAL_ERROR "找不到 librknnrt；请设置 -DRKNN_LIBRARY=/path/to/librknnrt.so")
+endif()
+find_path(RKNN_INCLUDE_DIR rknn_api.h
+    HINTS ${CMAKE_CURRENT_SOURCE_DIR}/ai
+          /usr/include/rockchip /usr/include/rknn /usr/local/include)
+if(NOT RKNN_INCLUDE_DIR)
+    message(FATAL_ERROR "找不到 RKNN SDK 头文件；请设置 -DRKNN_INCLUDE_DIR=/path/to/rknn/include")
+endif()
 
 add_executable(qt_window
     app_style.cpp
     app_style.hpp
     camera_pipeline.cpp
     camera_pipeline.hpp
+    ai/yolo_rknn.cpp
+    ai/yolo_rknn.hpp
     main.cpp
     main_window.cpp
     main_window.hpp
@@ -46,7 +60,7 @@ add_executable(qt_window
     ../rtsp_publisher.cpp
 )
 
-target_include_directories(qt_window PRIVATE .. ${MPP_INCLUDE_DIR} ${RGA_INCLUDE_DIR})
+target_include_directories(qt_window PRIVATE .. ai ${MPP_INCLUDE_DIR} ${RGA_INCLUDE_DIR} ${RKNN_INCLUDE_DIR})
 target_link_libraries(qt_window PRIVATE Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Multimedia
-    Qt6::MultimediaWidgets Qt6::Network ${MPP_LIBRARY} ${RGA_LIBRARY}
+    Qt6::MultimediaWidgets Qt6::Network ${MPP_LIBRARY} ${RGA_LIBRARY} ${RKNN_LIBRARY}
     PkgConfig::LIBAV pthread)
